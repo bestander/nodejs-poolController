@@ -989,6 +989,8 @@ export class PumpState extends EqState {
     }
     private _pumpOnDelayTimer: NodeJS.Timeout;
     private _threshold = 0.05;
+    private _currentPrimingEvent: PumpPrimingLogEntry;
+    public primingHistory: PumpPrimingLogEntry[] = [];
     private exceedsThreshold(origVal: number, newVal: number) {
         return Math.abs((newVal - origVal) / origVal) > this._threshold;
     }
@@ -1025,10 +1027,14 @@ export class PumpState extends EqState {
     public set status(val: number) {
         // quick fix for #172
         if (this.status !== val) {
+            let oldStatus = this.status;
             if (sys.board.valueMaps.pumpTypes.getName(this.type) === 'vsf' && val === 0) {
                 this.data.status = { name: 'ok', desc: 'Ok', val: 0 };
             }
             else this.data.status = sys.board.valueMaps.pumpStatus.transform(val);
+            // Track priming events: status 4 = priming
+            if (val === 4 && oldStatus !== 4) this.startPriming();
+            else if (oldStatus === 4 && val !== 4) this.endPriming();
             this.hasChanged = true;
         }
     }
@@ -1068,7 +1074,37 @@ export class PumpState extends EqState {
             this.pumpOnDelay = false;
         }, delay);
     }
-   
+    private startPriming() {
+        this._currentPrimingEvent = new PumpPrimingLogEntry();
+        this._currentPrimingEvent.pumpId = this.id;
+        this._currentPrimingEvent.start = new Date();
+        logger.info(`Pump ${this.name} entered priming mode`);
+    }
+    private endPriming() {
+        if (typeof this._currentPrimingEvent === 'undefined') return;
+        let entry = this._currentPrimingEvent;
+        entry.end = new Date();
+        entry.duration = Math.round((entry.end.getTime() - entry.start.getTime()) / 1000);
+        entry.save();
+        this.primingHistory.unshift(entry);
+        this._currentPrimingEvent = undefined;
+        this.calcPrimingHistory();
+        logger.info(`Pump ${this.name} exited priming mode after ${entry.duration}s`);
+    }
+    public calcPrimingHistory(): number {
+        let dt = new Date();
+        let dtMax = dt.setTime(dt.getTime() - (24 * 60 * 60 * 1000));
+        for (let i = this.primingHistory.length - 1; i >= 0; i--) {
+            let ph = this.primingHistory[i];
+            if (typeof ph.end !== 'undefined'
+                && typeof ph.end.getTime === 'function'
+                && ph.end.getTime() > dtMax) continue;
+            else this.primingHistory.splice(i, 1);
+        }
+        return this.primingHistory.length + (typeof this._currentPrimingEvent !== 'undefined' ? 1 : 0);
+    }
+    public get dailyPrimingCount(): number { return this.calcPrimingHistory(); }
+
     public getExtended() {
         let pump = this.get(true);
         let cpump = sys.pumps.getItemById(pump.id);
@@ -1120,12 +1156,7 @@ export class PumpState extends EqState {
             pump.circuits.push(c);
         }
         pump.circuits.sort((a, b) => { return a.id > b.id ? 1 : -1; });
-        /*         for (let i = 0; i < cpump.circuits.length; i++) {
-                    let c = cpump.circuits.getItemByIndex(i).get(true);
-                    c.circuit = state.circuits.getInterfaceById(c.circuit).get(true);
-                    c.units = sys.board.valueMaps.pumpUnits.transform(c.units);
-                    pump.circuits.push(c);
-                } */
+        pump.dailyPrimingCount = this.dailyPrimingCount;
         return pump;
     }
 }
@@ -3350,6 +3381,28 @@ export class ChemicalDoseState extends DataLoggerEntry {
     }
 }
 
+export class PumpPrimingLogEntry extends DataLoggerEntry {
+    public pumpId: number;
+    public start: Date;
+    public end: Date;
+    public duration: number; // seconds
+
+    constructor(entry?: string | object) {
+        super();
+        if (typeof entry === 'object') entry = JSON.stringify(entry);
+        if (typeof entry === 'string') this.parse(entry);
+    }
+    public static createInstance(entry?: string): PumpPrimingLogEntry { return new PumpPrimingLogEntry(entry); }
+    public save() { DataLogger.writeEnd(`pumpPriming_${this.pumpId}.log`, this); }
+    public parse(entry: string) {
+        let obj = typeof entry !== 'undefined' ? JSON.parse(entry) : {};
+        for (const prop in obj) { obj[prop] = this.dateParser(prop, obj[prop]); }
+        if (typeof obj.pumpId !== 'undefined') this.pumpId = obj.pumpId;
+        if (typeof obj.start !== 'undefined') this.start = obj.start;
+        if (typeof obj.end !== 'undefined') this.end = obj.end;
+        if (typeof obj.duration !== 'undefined') this.duration = obj.duration;
+    }
+}
 export class ChemicalDemandState extends ChildEqState {
     public initData() {
         if (typeof this.data.time === 'undefined') this.data.time = [];

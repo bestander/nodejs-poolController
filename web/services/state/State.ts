@@ -18,7 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import * as express from "express";
 import * as extend from "extend";
 
-import { state, ICircuitState, LightGroupState, ICircuitGroupState, ChemicalDoseState } from "../../../controller/State";
+import { state, ICircuitState, LightGroupState, ICircuitGroupState, ChemicalDoseState, PumpPrimingLogEntry } from "../../../controller/State";
 import { sys } from "../../../controller/Equipment";
 import { utils } from '../../../controller/Constants';
 import { logger } from "../../../logger/Logger";
@@ -289,6 +289,20 @@ export class StateRoute {
             // todo: need getInterfaceById.get() for features
             let pump = state.pumps.getItemById(parseInt(req.params.id, 10));
             return res.status(200).send(pump.getExtended());
+        });
+        app.get('/state/pump/:id/primingLog', async (req, res, next) => {
+            try {
+                let pumpId = parseInt(req.params.id, 10);
+                let filter = req.body || {};
+                let dh = await DataLogger.readFromEndAsync(`pumpPriming_${pumpId}.log`, PumpPrimingLogEntry, (lineNumber: number, entry: PumpPrimingLogEntry, arr: PumpPrimingLogEntry[]): boolean => {
+                    if (entry.pumpId !== pumpId) return false;
+                    if (typeof filter.lines !== 'undefined' && filter.lines <= arr.length) return false;
+                    if (typeof filter.date !== 'undefined' && entry.end < filter.date) return false;
+                    return true;
+                });
+                return res.status(200).send(dh);
+            }
+            catch (err) { next(err); }
         });
         app.put('/state/circuit/setState', async (req, res, next) => {
             try {
